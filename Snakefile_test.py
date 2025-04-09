@@ -1,42 +1,49 @@
 import glob
-import os
 
-# Get all BAMs inside old_bam folders
-bam_files = glob.glob("/scratch/tsapalou/renamed_bams_7g_T2T/bam_5/*/old_bam/*.bam")
-
-# Remove trailing .bam for use as a wildcard in the rule
-bam_stems = [f[:-4] for f in bam_files]  # removes ".bam"
+# Get all BAM stems (without .bam)
+bam_stems = [
+    f[:-4] for f in glob.glob("/scratch/tsapalou/renamed_bams_7g_T2T/bam_5/*/old_bam/*.bam")
+    if f.endswith(".bam")
+]
 
 rule all:
     input:
-        expand("{path}.sm_tagged.ok", path=bam_stems)
+        expand("{path}.bam.bai", path=bam_stems)
 
 rule update_sm_tag:
     input:
-        bam="{path}.bam"
+        bam = "{path}.bam"
     output:
-        done="{path}.sm_tagged.ok"
+        bai = "{path}.bam.bai"
+    log:
+        "{path}.sm_tag_update.log"
     threads: 4
+    resources:
+        mem_mb = 4000
     shell:
-        """
+        r"""
         set -euo pipefail
-        module load SAMtools/1.14-GCC-11.2.0
+        set -x
 
-        BAM_FILE="{input.bam}"
-        SAMPLE=$(basename $(dirname $(dirname "$BAM_FILE")))
-        TEMP_HEADER=$(mktemp)
+        SAMPLE=$(basename $(dirname $(dirname "{input.bam}")))
+        BAM="{input.bam}"
+        TMP_HEADER=$(mktemp)
+        TMP_BAM="${BAM}.tmp"
 
-        OLD_SM=$(samtools view -H "$BAM_FILE" | grep "^@RG" | grep -o "SM:[^[:space:]]*" | cut -d':' -f2)
+        OLD_SM=$(samtools view -H "$BAM" | grep "^@RG" | grep -o "SM:[^[:space:]]*" | cut -d':' -f2 | head -n 1 || true)
 
-        echo "Updating $BAM_FILE: $OLD_SM → $SAMPLE"
+        echo "Updating $BAM: $OLD_SM → $SAMPLE" > "{log}"
 
-        samtools view -H "$BAM_FILE" | sed "s/SM:$OLD_SM/SM:$SAMPLE/" > "$TEMP_HEADER"
-        samtools reheader "$TEMP_HEADER" "$BAM_FILE" | samtools sort -o "${BAM_FILE}.tmp"
-        mv "${BAM_FILE}.tmp" "$BAM_FILE"
-        samtools index "$BAM_FILE"
-        rm "$TEMP_HEADER"
+        if [[ -z "$OLD_SM" ]]; then
+            echo "No SM tag found in $BAM" >> "{log}"
+            exit 1
+        fi
 
-        # Create and remove marker so Snakemake thinks job succeeded
-        touch {output.done}
-        rm {output.done}
+        samtools view -H "$BAM" | sed "s/SM:$OLD_SM/SM:$SAMPLE/" > "$TMP_HEADER"
+        samtools reheader "$TMP_HEADER" "$BAM" > "$TMP_BAM"
+        samtools sort -@ {threads} -m {resources.mem_mb}M -O bam -o "$BAM" "$TMP_BAM"
+        samtools index -@ {threads} --output "{output.bai}" "$BAM"
+
+        rm "$TMP_HEADER" "$TMP_BAM"
         """
+
